@@ -1,0 +1,5 @@
+flet>=0.25
+pandas>=2.2
+openpyxl>=3.1
+dash>=2.18
+plotly>=5.24
