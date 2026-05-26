@@ -1346,6 +1346,12 @@ def _referral_commission_result(context, state: dict[str, Any], deal: Deal) -> _
         deal.client_fix_date or "",
         _deal_operation_type(deal) or "",
         bool(deal.is_repeat_payment),
+        deal.client_rate_percent,
+        deal.repeat_payment_commission_percent,
+        deal.fixed_commission_amount,
+        deal.fixed_commission_currency,
+        deal.pnl_client_percent_fee_usd,
+        deal.pnl_fixed_commission_usd,
     )
     if cache_key in cache:
         return cache[cache_key]
@@ -1381,7 +1387,7 @@ def _referral_commission_result(context, state: dict[str, Any], deal: Deal) -> _
         if condition is None:
             result = _ReferralCommissionResult("Нет ставки", "Условие ставки не найдено в справочнике.", False)
         else:
-            result = _build_referral_commission_result(deal, referral_name, match, condition, deal_amount, amount_usd)
+            result = _build_referral_commission_result(context, state, deal, referral_name, match, condition, deal_amount, amount_usd)
     except _InactiveReferralError:
         result = _inactive_referral_commission_result(referral_name)
     except Exception:
@@ -1468,6 +1474,8 @@ def _deal_operation_type(deal: Deal) -> str | None:
 
 
 def _build_referral_commission_result(
+    context,
+    state: dict[str, Any],
     deal: Deal,
     referral_name: str,
     match: Any,
@@ -1513,7 +1521,23 @@ def _build_referral_commission_result(
             False,
         )
 
-    total_usd = percent_usd + fixed_usd
+    client_percent_usd = _cached_client_percent_fee_usd(state, deal)
+    if client_percent_usd is None:
+        return _ReferralCommissionResult(
+            "Нет курса",
+            "Нельзя посчитать ставку реферала: нет USD-эквивалента для клиентской процентной комиссии.",
+            False,
+        )
+    client_fixed_usd = _cached_usd_component_value(context, state, deal, "__fixed_commission_usd")
+    if client_fixed_usd is None:
+        return _ReferralCommissionResult(
+            "Нет курса",
+            "Нельзя посчитать ставку реферала: нет USD-эквивалента для фиксированной комиссии клиента.",
+            False,
+        )
+
+    condition_total_usd = percent_usd + fixed_usd
+    total_usd = client_percent_usd + client_fixed_usd - condition_total_usd
     label = f"{_format_number(total_usd, 2)} USD"
     tooltip = _referral_commission_tooltip(
         deal=deal,
@@ -1529,6 +1553,9 @@ def _build_referral_commission_result(
         fixed_amount=fixed_amount,
         fixed_currency=fixed_currency,
         fixed_usd=fixed_usd,
+        client_percent_usd=client_percent_usd,
+        client_fixed_usd=client_fixed_usd,
+        condition_total_usd=condition_total_usd,
         total_usd=total_usd,
     )
     return _ReferralCommissionResult(label, tooltip, True, total_usd)
@@ -1573,6 +1600,9 @@ def _referral_commission_tooltip(
     fixed_amount: float,
     fixed_currency: str,
     fixed_usd: float,
+    client_percent_usd: float,
+    client_fixed_usd: float,
+    condition_total_usd: float,
     total_usd: float,
 ) -> str:
     basis = "eq. USD" if getattr(condition, "amount_basis", "") == "usd_equivalent" else "валюта сделки"
@@ -1601,11 +1631,15 @@ def _referral_commission_tooltip(
             f"Условие #{getattr(condition, 'id', None) or getattr(match, 'matched_rule_id', '-')}, база: {basis}",
             f"Диапазон условия: {amount_from}-{amount_to}, даты {date_from}-{date_to}",
             f"База для %: {_format_number(base_amount, 2)} {base_currency or '-'}",
-            f"% комиссия: {_format_number(rate_percent, 2)}% = {_format_number(percent_native, 2)} {percent_currency or '-'} -> {_format_number(percent_usd, 2)} USD",
-            f"Фикс: {_format_number(fixed_amount, 2)} {fixed_currency} -> {_format_number(fixed_usd, 2)} USD",
+            f"Комиссия клиента %: {_format_number(client_percent_usd, 2)} USD",
+            f"Фикс клиента: {_format_number(client_fixed_usd, 2)} USD",
+            f"Условие %: {_format_number(rate_percent, 2)}% = {_format_number(percent_native, 2)} {percent_currency or '-'} -> {_format_number(percent_usd, 2)} USD",
+            f"Условие фикс: {_format_number(fixed_amount, 2)} {fixed_currency} -> {_format_number(fixed_usd, 2)} USD",
+            f"Комиссия по условию: {_format_number(condition_total_usd, 2)} USD",
             f"Кросс-курс: {cross_text}",
             f"Конвертация: {conversion_text}",
-            f"Итого: {_format_number(total_usd, 2)} USD",
+            "Формула: комиссия клиента % + фикс клиента - условие % - условие фикс",
+            f"Итого: {_format_number(client_percent_usd, 2)} + {_format_number(client_fixed_usd, 2)} - {_format_number(percent_usd, 2)} - {_format_number(fixed_usd, 2)} = {_format_number(total_usd, 2)} USD",
         )
     )
 
