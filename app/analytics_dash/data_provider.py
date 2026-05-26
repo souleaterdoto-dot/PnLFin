@@ -102,7 +102,43 @@ class AnalyticsDataProvider:
                     """,
                     connection,
                 )
-            self._cached_deals = prepare_deals_frame(raw, rates)
+                referrals = pd.read_sql_query(
+                    """
+                    SELECT id, name, code, is_active
+                    FROM referrals
+                    """,
+                    connection,
+                )
+                rate_conditions = pd.read_sql_query(
+                    """
+                    SELECT
+                        id,
+                        referral_id,
+                        is_active,
+                        priority,
+                        operation_type,
+                        currency,
+                        amount_from,
+                        amount_to,
+                        amount_basis,
+                        date_from,
+                        date_to,
+                        rate_value,
+                        percent_commission_currency,
+                        fixed_commission_amount,
+                        fixed_commission_currency
+                    FROM rate_conditions
+                    """,
+                    connection,
+                )
+                client_exceptions = pd.read_sql_query(
+                    """
+                    SELECT client_name, date_from, date_to
+                    FROM client_rate_exceptions
+                    """,
+                    connection,
+                )
+            self._cached_deals = prepare_deals_frame(raw, rates, referrals, rate_conditions, client_exceptions)
             self._cached_mtime = mtime
             return self._cached_deals.copy()
 

@@ -340,7 +340,13 @@ class AnalyticsService:
             return {"total_pnl": 0.0, "realized_pnl": 0.0, "mtm_pnl": 0.0}
 
 
-def prepare_deals_frame(deals: pd.DataFrame, rates: pd.DataFrame | None = None) -> pd.DataFrame:
+def prepare_deals_frame(
+    deals: pd.DataFrame,
+    rates: pd.DataFrame | None = None,
+    referrals: pd.DataFrame | None = None,
+    rate_conditions: pd.DataFrame | None = None,
+    client_exceptions: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """Normalize raw SQLite deal rows into analytics columns."""
     if deals.empty:
         return _empty_deals_frame()
@@ -417,10 +423,13 @@ def prepare_deals_frame(deals: pd.DataFrame, rates: pd.DataFrame | None = None) 
         lambda row: _manual_or_converted(row, "pnl_swift_commission_usd", "swift_commission_amount", "swift_commission_currency", rate_lookup),
         axis=1,
     )
-    result["referral_commission_usd"] = 0.0
-    result.loc[result["pnl_referral_commission_usd_is_manual"], "referral_commission_usd"] = result.loc[
-        result["pnl_referral_commission_usd_is_manual"], "pnl_referral_commission_usd"
-    ].abs()
+    referral_lookup = _build_referral_lookup(referrals)
+    condition_lookup = _build_condition_lookup(rate_conditions)
+    exception_lookup = _build_client_exception_lookup(client_exceptions)
+    result["referral_commission_usd"] = result.apply(
+        lambda row: _analytics_referral_commission_usd(row, referral_lookup, condition_lookup, exception_lookup, rate_lookup),
+        axis=1,
+    )
     result.loc[result["is_refund_to_client"], ["client_percent_fee_usd", "fixed_commission_usd", "swift_usd", "referral_commission_usd"]] = 0.0
     result.loc[result.get("is_repeat_payment", 0).fillna(0).astype(int) == 1, "referral_commission_usd"] = 0.0
     result["repeat_payment_penalty_usd"] = result["repeat_payment_penalty_usd"].abs()
@@ -561,6 +570,186 @@ def _percent_fraction(value: Any) -> float:
 
 def _positive_percent_fraction(value: Any) -> float:
     return abs(_percent_fraction(value))
+
+
+def _build_referral_lookup(referrals: pd.DataFrame | None) -> dict[str, dict[str, Any]]:
+    """Build case-insensitive referral lookup by name and code."""
+    if referrals is None or referrals.empty:
+        return {}
+    lookup: dict[str, dict[str, Any]] = {}
+    for row in referrals.to_dict("records"):
+        prepared = dict(row)
+        for key in ("name", "code"):
+            value = str(prepared.get(key) or "").strip()
+            if value:
+                lookup[value.casefold()] = prepared
+    return lookup
+
+
+def _build_condition_lookup(rate_conditions: pd.DataFrame | None) -> dict[int, list[dict[str, Any]]]:
+    """Group active rate conditions by referral id in priority order."""
+    if rate_conditions is None or rate_conditions.empty:
+        return {}
+    prepared = rate_conditions.copy()
+    prepared["is_active"] = pd.to_numeric(prepared.get("is_active"), errors="coerce").fillna(0).astype(int)
+    prepared["priority"] = pd.to_numeric(prepared.get("priority"), errors="coerce").fillna(100).astype(int)
+    prepared = prepared[prepared["is_active"] == 1].sort_values(["referral_id", "priority", "id"])
+    lookup: dict[int, list[dict[str, Any]]] = {}
+    for row in prepared.to_dict("records"):
+        referral_id = int(row.get("referral_id") or 0)
+        if referral_id:
+            lookup.setdefault(referral_id, []).append(row)
+    return lookup
+
+
+def _build_client_exception_lookup(client_exceptions: pd.DataFrame | None) -> dict[str, list[dict[str, Any]]]:
+    """Group client exception rows by normalized client name."""
+    if client_exceptions is None or client_exceptions.empty:
+        return {}
+    lookup: dict[str, list[dict[str, Any]]] = {}
+    for row in client_exceptions.to_dict("records"):
+        client_name = str(row.get("client_name") or "").strip().casefold()
+        if client_name:
+            lookup.setdefault(client_name, []).append(dict(row))
+    return lookup
+
+
+def _analytics_referral_commission_usd(
+    row: pd.Series,
+    referral_lookup: dict[str, dict[str, Any]],
+    condition_lookup: dict[int, list[dict[str, Any]]],
+    exception_lookup: dict[str, list[dict[str, Any]]],
+    rate_lookup: dict[tuple[str, str], float],
+) -> float:
+    """
+    Calculate the same referral amount used by the registry PnL USD column.
+
+    Formula for an auto-matched condition:
+    client percent fee USD + client fixed fee USD - condition percent USD - condition fixed USD.
+    """
+    if bool(row.get("pnl_referral_commission_usd_is_manual", False)):
+        return abs(float(row.get("pnl_referral_commission_usd") or 0.0))
+    if bool(row.get("is_refund_to_client", False)) or int(row.get("is_repeat_payment") or 0) == 1:
+        return 0.0
+    if _has_client_exception(row, exception_lookup):
+        return 0.0
+
+    referral_name = str(row.get("customer_article_name") or "").strip()
+    if not referral_name or referral_name.casefold() in {"без банка", "Р±РµР· Р±Р°РЅРєР°"}:
+        return 0.0
+    referral = referral_lookup.get(referral_name.casefold())
+    if not referral or int(referral.get("is_active") or 0) != 1:
+        return 0.0
+
+    referral_id = int(referral.get("id") or 0)
+    matches = [
+        condition
+        for condition in condition_lookup.get(referral_id, [])
+        if _condition_matches_deal(condition, row)
+    ]
+    if len(matches) != 1:
+        return 0.0
+    return _condition_referral_commission_usd(matches[0], row, rate_lookup)
+
+
+def _has_client_exception(row: pd.Series, exception_lookup: dict[str, list[dict[str, Any]]]) -> bool:
+    client_name = str(row.get("client_name") or "").strip().casefold()
+    if not client_name:
+        return False
+    deal_date = _safe_date(row.get("client_fix_date")) or _safe_date(row.get("analytics_date"))
+    if not deal_date:
+        return False
+    for exception in exception_lookup.get(client_name, []):
+        date_from = _safe_date(exception.get("date_from"))
+        date_to = _safe_date(exception.get("date_to"))
+        if date_from and deal_date < date_from:
+            continue
+        if date_to and deal_date > date_to:
+            continue
+        return True
+    return False
+
+
+def _condition_matches_deal(condition: dict[str, Any], row: pd.Series) -> bool:
+    operation_type = str(condition.get("operation_type") or "").strip()
+    if operation_type and _operation_type_key(operation_type) != _operation_type_key(_operation_type_label(row)):
+        return False
+
+    condition_currency = _normalize_currency(condition.get("currency") or "")
+    if condition_currency and condition_currency != _normalize_currency(row.get("deal_currency")):
+        return False
+
+    deal_date = _safe_date(row.get("client_fix_date")) or _safe_date(row.get("analytics_date"))
+    if not deal_date:
+        return False
+    date_from = _safe_date(condition.get("date_from"))
+    date_to = _safe_date(condition.get("date_to"))
+    if date_from and deal_date < date_from:
+        return False
+    if date_to and deal_date > date_to:
+        return False
+
+    amount = _amount_for_condition(condition, row)
+    if amount is None:
+        return False
+    amount_from = _optional_float(condition.get("amount_from"))
+    amount_to = _optional_float(condition.get("amount_to"))
+    if amount_from is not None and amount < amount_from:
+        return False
+    if amount_to is not None and amount >= amount_to:
+        return False
+    return True
+
+
+def _condition_referral_commission_usd(
+    condition: dict[str, Any],
+    row: pd.Series,
+    rate_lookup: dict[tuple[str, str], float],
+) -> float:
+    base_amount = _amount_for_condition(condition, row) or 0.0
+    basis = str(condition.get("amount_basis") or "deal_currency")
+    base_currency = "USD" if basis == "usd_equivalent" else _normalize_currency(row.get("deal_currency"))
+    condition_rate = abs(_percent_fraction(condition.get("rate_value")))
+    condition_percent_native = base_amount * condition_rate
+    percent_currency = condition.get("percent_commission_currency") or base_currency
+    condition_percent_usd = _usd_amount(condition_percent_native, percent_currency, row, rate_lookup)
+
+    fixed_amount = abs(float(condition.get("fixed_commission_amount") or 0.0))
+    fixed_currency = condition.get("fixed_commission_currency") or percent_currency or base_currency
+    condition_fixed_usd = _usd_amount(fixed_amount, fixed_currency, row, rate_lookup)
+
+    client_percent_usd = abs(float(row.get("client_percent_fee_usd") or 0.0))
+    client_fixed_usd = abs(float(row.get("fixed_commission_usd") or 0.0))
+    return client_percent_usd + client_fixed_usd - condition_percent_usd - condition_fixed_usd
+
+
+def _amount_for_condition(condition: dict[str, Any], row: pd.Series) -> float | None:
+    if str(condition.get("amount_basis") or "deal_currency") == "usd_equivalent":
+        return abs(float(row.get("deal_amount_usd") or 0.0))
+    return abs(float(row.get("deal_amount") or row.get("deal_amount_abs") or 0.0))
+
+
+def _operation_type_key(value: Any) -> str:
+    text = str(value or "").strip().casefold()
+    if "usdt" in text:
+        return "export" if "export" in text or "экспорт" in text or "СЌРєСЃРїРѕСЂС‚".casefold() in text else "import"
+    if text in {"export", "экспорт", "СЌРєСЃРїРѕСЂС‚".casefold()}:
+        return "export"
+    if text in {"import", "импорт", "РёРјРїРѕСЂС‚".casefold()}:
+        return "import"
+    return "export" if "export" in text or "экспорт" in text or "СЌРєСЃРїРѕСЂС‚".casefold() in text else "import"
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        if value is None or pd.isna(value):
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        return float(text.replace(" ", "").replace(",", "."))
+    except (TypeError, ValueError):
+        return None
 
 
 def _sum_by(deals: pd.DataFrame, column: str, value_column: str, label: str, value: str) -> pd.DataFrame:
