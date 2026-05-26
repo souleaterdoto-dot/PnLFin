@@ -109,7 +109,7 @@ class _PnlBreakdown:
             or self.referral.amount_usd is None
         ):
             return None
-        return self.agent_commission + self.swift_commission + self.referral.amount_usd
+        return self.agent_commission + self.swift_commission + abs(self.referral.amount_usd)
 
     @property
     def pnl(self) -> float | None:
@@ -2560,7 +2560,7 @@ def _pnl_tooltip(breakdown: _PnlBreakdown) -> str:
         "Расходы:",
         f"Комиссия ПА: {_fmt_usd_component(breakdown.agent_commission)}",
         f"Комиссия за SWIFT ПА: {_fmt_usd_component(breakdown.swift_commission)}",
-        f"Ставка реферала: {_fmt_usd_component(breakdown.referral.amount_usd)}",
+        f"Ставка реферала: {_fmt_usd_component(_referral_cost_value(breakdown.referral.amount_usd))}",
         f"Расходы всего: {_fmt_usd_component(costs)}",
         "",
         f"Итого PnL: {_fmt_usd_component(pnl)}",
@@ -2569,6 +2569,10 @@ def _pnl_tooltip(breakdown: _PnlBreakdown) -> str:
         lines.append("")
         lines.append("Не хватает данных для полного расчета.")
     return "\n".join(lines)
+
+
+def _referral_cost_value(value: float | None) -> float | None:
+    return None if value is None else abs(value)
 
 
 def _fmt_usd_component(value: float | None) -> str:

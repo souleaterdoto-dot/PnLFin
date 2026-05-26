@@ -310,7 +310,7 @@ class AnalyticsService:
         swift = float(deals["swift_usd"].sum()) if not deals.empty else 0.0
         agent = -float(deals["agent_commission_usd"].sum()) if not deals.empty else 0.0
         swift_agent = -float(deals["swift_commission_usd"].sum()) if not deals.empty else 0.0
-        referral = -float(deals["referral_commission_usd"].sum()) if not deals.empty else 0.0
+        referral = -float(deals["referral_commission_cost_usd"].sum()) if not deals.empty else 0.0
         repeat_penalty = float(deals["repeat_payment_penalty_usd"].sum()) if not deals.empty else 0.0
         total = client_percent + fixed + swift + agent + swift_agent + referral + repeat_penalty
         return pd.DataFrame(
@@ -433,6 +433,7 @@ def prepare_deals_frame(
     result.loc[result["is_refund_to_client"], ["client_percent_fee_usd", "fixed_commission_usd", "swift_usd", "referral_commission_usd"]] = 0.0
     result.loc[result.get("is_repeat_payment", 0).fillna(0).astype(int) == 1, "referral_commission_usd"] = 0.0
     result["repeat_payment_penalty_usd"] = result["repeat_payment_penalty_usd"].abs()
+    result["referral_commission_cost_usd"] = result["referral_commission_usd"].abs()
     result["gross_income_usd"] = (
         result["client_percent_fee_usd"]
         + result["fixed_commission_usd"]
@@ -442,7 +443,7 @@ def prepare_deals_frame(
     result["total_costs_usd"] = (
         result["agent_commission_usd"]
         + result["swift_commission_usd"]
-        + result["referral_commission_usd"]
+        + result["referral_commission_cost_usd"]
     )
     result["net_pnl_usd"] = result["gross_income_usd"] - result["total_costs_usd"]
     return result
@@ -802,6 +803,7 @@ def _empty_deals_frame() -> pd.DataFrame:
             "agent_commission_usd",
             "swift_commission_usd",
             "referral_commission_usd",
+            "referral_commission_cost_usd",
             "repeat_payment_penalty_usd",
             "total_costs_usd",
             "net_pnl_usd",
