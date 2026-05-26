@@ -310,7 +310,7 @@ class AnalyticsService:
         swift = float(deals["swift_usd"].sum()) if not deals.empty else 0.0
         agent = -float(deals["agent_commission_usd"].sum()) if not deals.empty else 0.0
         swift_agent = -float(deals["swift_commission_usd"].sum()) if not deals.empty else 0.0
-        referral = -float(deals["referral_commission_cost_usd"].sum()) if not deals.empty else 0.0
+        referral = -float(deals["referral_commission_usd"].sum()) if not deals.empty else 0.0
         repeat_penalty = float(deals["repeat_payment_penalty_usd"].sum()) if not deals.empty else 0.0
         total = client_percent + fixed + swift + agent + swift_agent + referral + repeat_penalty
         return pd.DataFrame(
@@ -433,7 +433,6 @@ def prepare_deals_frame(
     result.loc[result["is_refund_to_client"], ["client_percent_fee_usd", "fixed_commission_usd", "swift_usd", "referral_commission_usd"]] = 0.0
     result.loc[result.get("is_repeat_payment", 0).fillna(0).astype(int) == 1, "referral_commission_usd"] = 0.0
     result["repeat_payment_penalty_usd"] = result["repeat_payment_penalty_usd"].abs()
-    result["referral_commission_cost_usd"] = result["referral_commission_usd"].abs()
     result["gross_income_usd"] = (
         result["client_percent_fee_usd"]
         + result["fixed_commission_usd"]
@@ -443,7 +442,7 @@ def prepare_deals_frame(
     result["total_costs_usd"] = (
         result["agent_commission_usd"]
         + result["swift_commission_usd"]
-        + result["referral_commission_cost_usd"]
+        + result["referral_commission_usd"]
     )
     result["net_pnl_usd"] = result["gross_income_usd"] - result["total_costs_usd"]
     return result
@@ -710,10 +709,10 @@ def _condition_referral_commission_usd(
     base_amount = _amount_for_condition(condition, row) or 0.0
     basis = str(condition.get("amount_basis") or "deal_currency")
     base_currency = "USD" if basis == "usd_equivalent" else _normalize_currency(row.get("deal_currency"))
-    condition_rate = abs(_percent_fraction(condition.get("rate_value")))
+    condition_rate = float(condition.get("rate_value") or 0.0) / 100
     condition_percent_native = base_amount * condition_rate
     percent_currency = condition.get("percent_commission_currency") or base_currency
-    condition_percent_usd = _usd_amount(condition_percent_native, percent_currency, row, rate_lookup)
+    condition_percent_usd = _signed_usd_amount(condition_percent_native, percent_currency, row, rate_lookup)
 
     fixed_amount = abs(float(condition.get("fixed_commission_amount") or 0.0))
     fixed_currency = condition.get("fixed_commission_currency") or percent_currency or base_currency
@@ -722,6 +721,27 @@ def _condition_referral_commission_usd(
     client_percent_usd = abs(float(row.get("client_percent_fee_usd") or 0.0))
     client_fixed_usd = abs(float(row.get("fixed_commission_usd") or 0.0))
     return client_percent_usd + client_fixed_usd - condition_percent_usd - condition_fixed_usd
+
+
+def _signed_usd_amount(
+    amount: Any,
+    currency: Any,
+    row: pd.Series,
+    rate_lookup: dict[tuple[str, str], float] | None = None,
+) -> float:
+    """Convert to USD without losing the sign of a rate condition."""
+    value = float(amount or 0.0)
+    normalized = _normalize_currency(currency or row.get("deal_currency") or "")
+    if normalized in USD_LIKE_CURRENCIES:
+        return value
+    deal_currency = _normalize_currency(row.get("deal_currency") or "")
+    if rate_lookup is not None and normalized != deal_currency:
+        converted = _usd_amount_from_rates(value, normalized, row, rate_lookup)
+        return converted if converted is not None else 0.0
+    rate = float(row.get("client_cross_rate") or 0.0)
+    if rate <= 0:
+        return value
+    return value * rate if _should_multiply_to_usd(normalized, rate) else value / rate
 
 
 def _amount_for_condition(condition: dict[str, Any], row: pd.Series) -> float | None:
@@ -803,7 +823,6 @@ def _empty_deals_frame() -> pd.DataFrame:
             "agent_commission_usd",
             "swift_commission_usd",
             "referral_commission_usd",
-            "referral_commission_cost_usd",
             "repeat_payment_penalty_usd",
             "total_costs_usd",
             "net_pnl_usd",
