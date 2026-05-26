@@ -1244,6 +1244,9 @@ def _manual_or_calculated_referral(context, state: dict[str, Any], deal: Deal) -
         return _client_refund_referral_commission_result(deal.customer_article_name or deal.payment_agent)
     if deal.is_repeat_payment:
         return _repeat_payment_referral_commission_result(deal.customer_article_name or deal.payment_agent)
+    exception = _client_exception_for_deal(context, state, deal)
+    if exception is not None and deal.pnl_referral_commission_usd is None:
+        return _client_exception_pending_referral_result(exception)
     if deal.pnl_referral_commission_usd is None:
         return _referral_commission_result(context, state, deal)
     value = float(deal.pnl_referral_commission_usd)
@@ -1456,6 +1459,24 @@ def _inactive_referral_commission_result(referral_name: str | None) -> _Referral
         "0,00 USD",
         f"Реферал: {referral_name or '-'}\nРеферал неактивен. Комиссия реферала считается равной 0 USD.",
         True,
+        0.0,
+    )
+
+
+def _client_exception_pending_referral_result(exception) -> _ReferralCommissionResult:
+    return _ReferralCommissionResult(
+        "Введите",
+        "\n".join(
+            (
+                "Клиент-исключение",
+                f"Клиент: {exception.client_name}",
+                f"Период: {_format_date(exception.date_from)} - {_exception_date_to_text(exception.date_to)}",
+                "Обычные условия реферала не применяются.",
+                "Введите ручную ставку реферала через значок рядом со значением.",
+                "До ввода ручного значения в PnL используется 0 USD.",
+            )
+        ),
+        False,
         0.0,
     )
 
