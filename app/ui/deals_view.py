@@ -674,7 +674,10 @@ def create_deals_view(context) -> ft.Control:
         state["suspicious_rates_only"] = False
         state["filter_values_cache"] = {}
         state["total_rows"] = None
-        refresh(recount=True, preserve_scroll=True)
+        state["computed_filtered_deals"] = None
+        state["table_scroll_offset"] = 0.0
+        context.page.update(search, portfolio_filter, operation_type_filter, referral_filter)
+        refresh(recount=True, preserve_scroll=False, partial_update=True)
 
     async def load_page_after_feedback(token: int) -> None:
         await asyncio.sleep(0.02)
